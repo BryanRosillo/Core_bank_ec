@@ -71,6 +71,7 @@ pay_credit_balance_model = bank_ns.model('PayCreditBalance', {
 @app.before_request
 def log_request_info():
     write_log("INFO", "Anonymous", f"Solicitud recibida: {request.method} {request.path}", 200)
+    
 
 # ---------------- Authentication Endpoints ----------------
 # Función para generar el token JWT
