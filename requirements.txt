@@ -1,0 +1,6 @@
+Flask==2.0.3
+psycopg2-binary==2.9.6
+gunicorn==20.1.0
+python-dotenv
+Flask-RESTX==0.5.1
+Werkzeug==2.0.3
