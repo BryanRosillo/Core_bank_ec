@@ -9,10 +9,17 @@ import logging
 import os
 import jwt
 import datetime
+import json
+import random
+import time
+from tempfile import NamedTemporaryFile
 
 SECRET_KEY = os.getenv("SECRET_KEY", "clave_secreta_por_defecto")
 blacklisted_tokens = set()
 
+# Path to save OTPs
+OTP_DIRECTORY = 'tmp_otps/'
+os.makedirs(OTP_DIRECTORY, exist_ok=True)
 
 # Configuración de logs
 logging.basicConfig(
@@ -45,6 +52,11 @@ login_model = auth_ns.model('Login', {
     'password': fields.String(required=True, description='Contraseña', example='pass1')
 })
 
+otp_model = auth_ns.model('OTP', {
+    'message': fields.String(required=True, description='Mensaje de respuesta'),
+    'OTP': fields.String(required=True, description='OTP generado'),
+})
+
 deposit_model = bank_ns.model('Deposit', {
     'account_number': fields.Integer(required=True, description='Número de cuenta', example=123),
     'amount': fields.Float(required=True, description='Monto a depositar', example=100)
@@ -56,7 +68,8 @@ withdraw_model = bank_ns.model('Withdraw', {
 
 transfer_model = bank_ns.model('Transfer', {
     'target_username': fields.String(required=True, description='Usuario destino', example='user2'),
-    'amount': fields.Float(required=True, description='Monto a transferir', example=100)
+    'amount': fields.Float(required=True, description='Monto a transferir', example=100),
+    'otp': fields.String(required=True, description='OTP', example='123456')
 })
 
 credit_payment_model = bank_ns.model('CreditPayment', {
@@ -117,6 +130,26 @@ def token_required(f):
         }
         return f(*args, **kwargs)
     return decorated
+
+# ---------------- OTP Endpoint ----------------
+# OTP is saved in a file. We can choose to use another option. 
+# OTP has 6 digits, and a time life of 5 min. 
+@auth_ns.route('/generate-otp')
+class GenerateOTP(Resource):
+    @token_required
+    def post(self):
+        """Genera un OTP de 6 dígitos y 5 min de vida, necesario para hacer transferencias."""
+        otp = str(random.randint(100000, 999999))
+        otp_data = {
+            "otp": otp,
+            "expires_at": time.time() + 300
+        }
+
+        otp_filename = os.path.join(OTP_DIRECTORY, f"{g.user['id']}_otp.json")
+        with open(otp_filename, 'w') as f:
+            json.dump(otp_data, f)
+
+        return {"message": "OTP created", "OTP": otp}, 200
 
 
 # ---------------- Authentication Endpoints ----------------
@@ -222,10 +255,27 @@ class Transfer(Resource):
         data = api.payload
         target_username = data.get("target_username")
         amount = data.get("amount", 0)
-        if not target_username or amount <= 0:
+        otp = data.get("otp")
+        
+        if not target_username or amount <= 0 or not otp:
             api.abort(400, "Invalid data")
         if target_username == g.user['username']:
             api.abort(400, "Cannot transfer to the same account")
+        
+        # OTP is checked
+        otp_filename = os.path.join(OTP_DIRECTORY, f"{g.user['id']}_otp.json")
+        if not os.path.exists(otp_filename):
+            api.abort(400, "No OTP found, please generate a new one")
+        with open(otp_filename, 'r') as f:
+            otp_data = json.load(f)
+        if time.time() > otp_data["expires_at"]:
+            os.remove(otp_filename)
+            api.abort(400, "OTP expired")
+        if otp_data["otp"] != otp:
+            os.remove(otp_filename)
+            api.abort(400, "Invalid OTP")
+        os.remove(otp_filename)
+
         conn = get_connection()
         cur = conn.cursor()
         # Check sender's balance
