@@ -4,11 +4,14 @@ from flask_restx import Api, Resource, fields # type: ignore
 from functools import wraps
 from .db import get_connection, init_db
 import logging
+import os
+import jwt
+import datetime
 
-# Define a simple in-memory token store
-tokens = {}
+SECRET_KEY = os.getenv("SECRET_KEY", "clave_secreta_por_defecto")
+blacklisted_tokens = set()
 
-#log = logging.getLogger(__name__)
+#log = logging.getLogger(__name__)  
 logging.basicConfig(
      filename="app.log",
      level=logging.DEBUG,
@@ -73,7 +76,52 @@ pay_credit_balance_model = bank_ns.model('PayCreditBalance', {
 })
 
 # ---------------- Authentication Endpoints ----------------
+# Función para generar el token JWT
+def generate_jwt(user_id, username, role):
+    expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=1)  # Expira en 1 hora
+    payload = {
+        "user_id": user_id,
+        "username": username,
+        "role": role,
+        "exp": expiration
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
+
+# Función para validar el token JWT
+def verify_jwt(token):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        return payload  # Devuelve la información del usuario
+    except jwt.ExpiredSignatureError:
+        api.abort(401, "Token expirado")
+    except jwt.InvalidTokenError:
+        api.abort(401, "Token inválido")
+    
+
+# ---------------- Token-Required Decorator ----------------
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            api.abort(401, "Authorization header missing or invalid")
+        token = auth_header.split(" ")[1]
+
+        if token in blacklisted_tokens:
+            api.abort(401, "Token invalidado")
+        
+        payload = verify_jwt(token)  # Verifica el JWT
+        g.user = {
+            "id": payload["user_id"],
+            "username": payload["username"],
+            "role": payload["role"]
+        }
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ---------------- Authentication Endpoints ----------------
 @auth_ns.route('/login')
 class Login(Resource):
     @auth_ns.expect(login_model, validate=True)
@@ -88,74 +136,27 @@ class Login(Resource):
         cur = conn.cursor()
         cur.execute("SELECT id, username, password, role, full_name, email FROM bank.users WHERE username = %s", (username,))
         user = cur.fetchone()
+        cur.close()
+        conn.close()
+        
         if user and user[2] == password:
-            token = secrets.token_hex(16)
-            # Persist the token in the database
-            cur.execute("INSERT INTO bank.tokens (token, user_id) VALUES (%s, %s)", (token, user[0]))
-            conn.commit()
-            cur.close()
-            conn.close()
-            return {"message": "Login successful", "token": token}, 200
+            token = generate_jwt(user[0], user[1], user[3])
+            return {"message": "Login exitoso", "token": token}, 200
         else:
-            cur.close()
-            conn.close()
-            api.abort(401, "Invalid credentials")
+            api.abort(401, "Credenciales inválidas")    
 
 @auth_ns.route('/logout')
 class Logout(Resource):
     @auth_ns.doc('logout')
+    @token_required  # Se requiere el token en el logout para poder invalidarlo
     def post(self):
-        """Invalida el token de autenticación."""
+        """Cierra sesión invalidando el token actual."""
         auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            api.abort(401, "Authorization header missing or invalid")
         token = auth_header.split(" ")[1]
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM bank.tokens WHERE token = %s", (token,))
-        if cur.rowcount == 0:
-            conn.commit()
-            cur.close()
-            conn.close()
-            api.abort(401, "Invalid token")
-        conn.commit()
-        cur.close()
-        conn.close()
-        return {"message": "Logout successful"}, 200
-
-# ---------------- Token-Required Decorator ----------------
-
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            api.abort(401, "Authorization header missing or invalid")
-        token = auth_header.split(" ")[1]
-        logging.debug("Token: "+str(token))
-        conn = get_connection()
-        cur = conn.cursor()
-        # Query the token in the database and join with users table to retrieve user info
-        cur.execute("""
-            SELECT u.id, u.username, u.role, u.full_name, u.email 
-            FROM bank.tokens t
-            JOIN bank.users u ON t.user_id = u.id
-            WHERE t.token = %s
-        """, (token,))
-        user = cur.fetchone()
-        cur.close()
-        conn.close()
-        if not user:
-            api.abort(401, "Invalid or expired token")
-        g.user = {
-            "id": user[0],
-            "username": user[1],
-            "role": user[2],
-            "full_name": user[3],
-            "email": user[4]
-        }
-        return f(*args, **kwargs)
-    return decorated
+        # Se añade el token a lista negra para invalidarlo en caso de que no expire todavía
+        blacklisted_tokens.add(token)
+        return {"message": "Logout exitoso."}, 200
+    
 
 # ---------------- Banking Operation Endpoints ----------------
 
