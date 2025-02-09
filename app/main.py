@@ -47,10 +47,13 @@ bank_ns = api.namespace('bank', description='Operaciones bancarias')
 
 
 # Define the expected payload models for Swagger
+
 login_model = auth_ns.model('Login', {
     'username': fields.String(required=True, description='Nombre de usuario', example='user1'),
     'password': fields.String(required=True, description='Contraseña', example='pass1')
 })
+# Ejemplo de petición:
+# curl -X POST "http://localhost:5000/login" -H "Content-Type: application/json" -d '{"username": "user1", "password": "pass1"}'
 
 otp_model = auth_ns.model('OTP', {
     'message': fields.String(required=True, description='Mensaje de respuesta'),
@@ -61,24 +64,36 @@ deposit_model = bank_ns.model('Deposit', {
     'account_number': fields.Integer(required=True, description='Número de cuenta', example=123),
     'amount': fields.Float(required=True, description='Monto a depositar', example=100)
 })
+# Ejemplo de petición:
+# curl -X POST "http://localhost:5000/deposit" -H "Content-Type: application/json" -d '{"account_number": 123, "amount": 100}'
 
 withdraw_model = bank_ns.model('Withdraw', {
     'amount': fields.Float(required=True, description='Monto a retirar', example=100)
 })
+# Ejemplo de petición:
+# curl -X POST "http://localhost:5000/withdraw" -H "Content-Type: application/json" -d '{"amount": 100}'
 
 transfer_model = bank_ns.model('Transfer', {
     'target_username': fields.String(required=True, description='Usuario destino', example='user2'),
     'amount': fields.Float(required=True, description='Monto a transferir', example=100),
     'otp': fields.String(required=True, description='OTP', example='123456')
 })
+# Ejemplo de petición:
+# curl -X POST "http://localhost:5000/transfer" -H "Content-Type: application/json" -d '{"target_username": "user2", "amount": 100, "otp": "123456"}'
 
 credit_payment_model = bank_ns.model('CreditPayment', {
     'amount': fields.Float(required=True, description='Monto de la compra a crédito', example=100)
 })
+# Ejemplo de petición:
+# curl -X POST "http://localhost:5000/credit-payment" -H "Content-Type: application/json" -d '{"amount": 100}'
 
 pay_credit_balance_model = bank_ns.model('PayCreditBalance', {
     'amount': fields.Float(required=True, description='Monto a abonar a la deuda de la tarjeta', example=50)
 })
+# Ejemplo de petición:
+# curl -X POST "http://localhost:5000/pay-credit-balance" -H "Content-Type: application/json" -d '{"amount": 50}'
+
+
 
 # Middleware para registrar solicitudes entrantes
 @app.before_request
