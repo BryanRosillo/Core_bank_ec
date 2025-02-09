@@ -138,18 +138,24 @@ def token_required(f):
 class GenerateOTP(Resource):
     @token_required
     def post(self):
-        """Genera un OTP de 6 dígitos y 5 min de vida, necesario para hacer transferencias."""
-        otp = str(random.randint(100000, 999999))
-        otp_data = {
-            "otp": otp,
-            "expires_at": time.time() + 300
-        }
+        try:
+            """Genera un OTP de 6 dígitos y 5 min de vida, necesario para hacer transferencias."""
+            otp = str(random.randint(100000, 999999))
+            otp_data = {
+                "otp": otp,
+                "expires_at": time.time() + 300
+            }
 
-        otp_filename = os.path.join(OTP_DIRECTORY, f"{g.user['id']}_otp.json")
-        with open(otp_filename, 'w') as f:
-            json.dump(otp_data, f)
+            otp_filename = os.path.join(OTP_DIRECTORY, f"{g.user['id']}_otp.json")
+            with open(otp_filename, 'w') as f:
+                json.dump(otp_data, f)
 
-        return {"message": "OTP created", "OTP": otp}, 200
+            write_log("INFO", g.user['username'], f"OTP generado para el usuario {g.user['username']}", 200)
+
+            return {"message": "OTP created", "OTP": otp}, 200
+        except Exception as e:
+            write_log("ERROR", g.user['username'], f"Error al generar OTP: {str(e)}", 500)
+            api.abort(500, "Error al generar OTP")
 
 
 # ---------------- Authentication Endpoints ----------------
@@ -162,7 +168,7 @@ class Login(Resource):
         password = data.get("password")
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT id, password FROM bank.users WHERE username = %s", (username,))
+        cur.execute("SELECT id, username, password, role FROM bank.users WHERE username = %s", (username,))
         user = cur.fetchone()
 
         cur.close()
@@ -170,8 +176,10 @@ class Login(Resource):
         
         if user and user[2] == password:
             token = generate_jwt(user[0], user[1], user[3])
+            write_log("INFO", username, "Inicio de sesión exitoso", 200)
             return {"message": "Login exitoso", "token": token}, 200
         else:
+            write_log("WARNING", username, "Intento de inicio de sesión fallido", 401)
             api.abort(401, "Credenciales inválidas")    
 
 @auth_ns.route('/logout')
@@ -184,6 +192,7 @@ class Logout(Resource):
         token = auth_header.split(" ")[1]
         # Se añade el token a lista negra para invalidarlo en caso de que no expire todavía
         blacklisted_tokens.add(token)
+        write_log("INFO", g.user['username'], "Cierre de sesión exitoso", 200)
         return {"message": "Logout exitoso."}, 200
     
 
@@ -204,11 +213,11 @@ class Deposit(Resource):
         cur.execute("UPDATE bank.accounts SET balance = balance + %s WHERE id = %s RETURNING balance", (amount, account_number))
         result = cur.fetchone()
         if not result:
-            write_log("ERROR", g.user, "Intento de depósito en cuenta inexistente", 404)
+            write_log("ERROR", g.user['username'], "Intento de depósito en cuenta inexistente", 404)
             return {"message": "Account not found"}, 404
         new_balance = float(result[0])
         conn.commit()
-        write_log("INFO", g.user, f"Depósito exitoso de {amount} en cuenta {account_number}", 200)
+        write_log("INFO", g.user['username'], f"Depósito exitoso de {amount} en cuenta {account_number}", 200)
         return {"message": "Deposit successful", "new_balance": new_balance}, 200
     
 
@@ -229,20 +238,28 @@ class Withdraw(Resource):
         cur.execute("SELECT balance FROM bank.accounts WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         if not row:
+            write_log("ERROR", g.user['username'], "Cuenta no encontrada", 404)
             cur.close()
             conn.close()
             api.abort(404, "Account not found")
         current_balance = float(row[0])
         if current_balance < amount:
+            write_log("WARNING", g.user['username'], "Fondos insuficientes para retiro", 400)
             cur.close()
             conn.close()
             api.abort(400, "Insufficient funds")
-        cur.execute("UPDATE bank.accounts SET balance = balance - %s WHERE user_id = %s RETURNING balance", (amount, user_id))
-        new_balance = float(cur.fetchone()[0])
-        conn.commit()
-        cur.close()
-        conn.close()
-        return {"message": "Withdrawal successful", "new_balance": new_balance}, 200
+        try:
+            cur.execute("UPDATE bank.accounts SET balance = balance - %s WHERE user_id = %s RETURNING balance", (amount, user_id))
+            new_balance = float(cur.fetchone()[0])
+            conn.commit()
+            write_log("INFO", g.user['username'], f"Retiro exitoso de {amount}. Nuevo saldo: {new_balance}", 200)
+            return {"message": "Withdrawal successful", "new_balance": new_balance}, 200
+        except Exception as e:
+            write_log("ERROR", g.user['username'], f"Error durante el retiro: {str(e)}", 500)
+            conn.rollback()
+            cur.close()
+            conn.close()
+            api.abort(500, "Error durante el retiro")
     
 
 @bank_ns.route('/transfer')
@@ -258,21 +275,26 @@ class Transfer(Resource):
         otp = data.get("otp")
         
         if not target_username or amount <= 0 or not otp:
+            write_log("ERROR", g.user['username'], "Datos inválidos para transferencia", 400)
             api.abort(400, "Invalid data")
         if target_username == g.user['username']:
+            write_log("ERROR", g.user['username'], "Intento de transferencia a la misma cuenta", 400)
             api.abort(400, "Cannot transfer to the same account")
         
         # OTP is checked
         otp_filename = os.path.join(OTP_DIRECTORY, f"{g.user['id']}_otp.json")
         if not os.path.exists(otp_filename):
+            write_log("ERROR", g.user['username'], "OTP no encontrado", 400)
             api.abort(400, "No OTP found, please generate a new one")
         with open(otp_filename, 'r') as f:
             otp_data = json.load(f)
         if time.time() > otp_data["expires_at"]:
             os.remove(otp_filename)
+            write_log("ERROR", g.user['username'], "OTP expirado", 400)
             api.abort(400, "OTP expired")
         if otp_data["otp"] != otp:
             os.remove(otp_filename)
+            write_log("ERROR", g.user['username'], "OTP inválido", 400)
             api.abort(400, "Invalid OTP")
         os.remove(otp_filename)
 
@@ -284,9 +306,11 @@ class Transfer(Resource):
         if not row:
             cur.close()
             conn.close()
+            write_log("ERROR", g.user['username'], "Cuenta del remitente no encontrada", 404)
             api.abort(404, "Sender account not found")
         sender_balance = float(row[0])
         if sender_balance < amount:
+            write_log("WARNING", g.user['username'], "Fondos insuficientes para transferencia", 400)
             cur.close()
             conn.close()
             api.abort(400, "Insufficient funds")
@@ -294,6 +318,7 @@ class Transfer(Resource):
         cur.execute("SELECT id FROM bank.users WHERE username = %s", (target_username,))
         target_user = cur.fetchone()
         if not target_user:
+            write_log("ERROR", g.user['username'], "Usuario destino no encontrado", 404)
             cur.close()
             conn.close()
             api.abort(404, "Target user not found")
@@ -308,9 +333,12 @@ class Transfer(Resource):
             conn.rollback()
             cur.close()
             conn.close()
+            write_log("ERROR", g.user['username'], f"Error durante la transferencia: {str(e)}", 500)
             api.abort(500, f"Error during transfer: {str(e)}")
         cur.close()
         conn.close()
+        write_log("INFO", g.user['username'],
+                  f"Transferencia exitosa de {amount} a {target_username}. Nuevo saldo: {new_balance}", 200)
         return {"message": "Transfer successful", "new_balance": new_balance}, 200
     
 
@@ -328,6 +356,7 @@ class CreditPayment(Resource):
         data = api.payload
         amount = data.get("amount", 0)
         if amount <= 0:
+            write_log("ERROR", g.user['username'], "Monto inválido para pago de crédito", 400)
             api.abort(400, "Amount must be greater than zero")
         user_id = g.user['id']
         conn = get_connection()
@@ -337,11 +366,13 @@ class CreditPayment(Resource):
         if not row:
             cur.close()
             conn.close()
+            write_log("ERROR", g.user['username'], "Cuenta no encontrada", 404)
             api.abort(404, "Account not found")
         account_balance = float(row[0])
         if account_balance < amount:
             cur.close()
             conn.close()
+            write_log("WARNING", g.user['username'], "Fondos insuficientes para pago de crédito", 400)
             api.abort(400, "Insufficient funds in account")
         try:
             cur.execute("UPDATE bank.accounts SET balance = balance - %s WHERE user_id = %s", (amount, user_id))
@@ -355,9 +386,12 @@ class CreditPayment(Resource):
             conn.rollback()
             cur.close()
             conn.close()
+            write_log("ERROR", g.user['username'], f"Error durante el pago de crédito: {str(e)}", 500)
             api.abort(500, f"Error processing credit card purchase: {str(e)}")
         cur.close()
         conn.close()
+        write_log("INFO", g.user['username'],
+                  f"Pago de crédito exitoso. Nuevo saldo: {new_account_balance}, Deuda: {new_credit_balance}", 200)
         return {
             "message": "Credit card purchase successful",
             "account_balance": new_account_balance,
@@ -379,6 +413,7 @@ class PayCreditBalance(Resource):
         data = api.payload
         amount = data.get("amount", 0)
         if amount <= 0:
+            write_log("ERROR", g.user['username'], "Monto inválido para pago de saldo de crédito", 400)
             api.abort(400, "Amount must be greater than zero")
         user_id = g.user['id']
         conn = get_connection()
@@ -389,11 +424,13 @@ class PayCreditBalance(Resource):
         if not row:
             cur.close()
             conn.close()
+            write_log("ERROR", g.user['username'], "Cuenta no encontrada", 404)
             api.abort(404, "Account not found")
         account_balance = float(row[0])
         if account_balance < amount:
             cur.close()
             conn.close()
+            write_log("WARNING", g.user['username'], "Fondos insuficientes para pago de saldo de crédito", 400)
             api.abort(400, "Insufficient funds in account")
         # Get current credit card debt
         cur.execute("SELECT balance FROM bank.credit_cards WHERE user_id = %s", (user_id,))
@@ -401,6 +438,7 @@ class PayCreditBalance(Resource):
         if not row:
             cur.close()
             conn.close()
+            write_log("ERROR", g.user['username'], "Tarjeta de crédito no encontrada", 404)
             api.abort(404, "Credit card not found")
         credit_debt = float(row[0])
         payment = min(amount, credit_debt)
@@ -416,9 +454,13 @@ class PayCreditBalance(Resource):
             conn.rollback()
             cur.close()
             conn.close()
+            write_log("ERROR", g.user['username'], f"Error durante el pago de saldo de crédito: {str(e)}", 500)
             api.abort(500, f"Error processing credit balance payment: {str(e)}")
         cur.close()
         conn.close()
+        write_log("INFO", g.user['username'],
+                  f"Pago de saldo de crédito exitoso. Nuevo saldo: {new_account_balance}, Deuda restante: {new_credit_debt}",
+                  200)
         return {
             "message": "Credit card debt payment successful",
             "account_balance": new_account_balance,
@@ -428,7 +470,16 @@ class PayCreditBalance(Resource):
 
 @app.before_first_request
 def initialize_db():
-    init_db()
+    try:
+        init_db()
+        write_log("INFO", "System", "Base de datos inicializada correctamente", 200)
+    except Exception as e:
+        write_log("ERROR", "System", f"Error al inicializar la base de datos: {str(e)}", 500)
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    write_log("ERROR", "System", f"Error no capturado: {str(e)}", 500)
+    return {"message": "Internal Server Error"}, 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)

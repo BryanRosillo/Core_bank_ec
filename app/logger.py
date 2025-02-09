@@ -30,8 +30,6 @@ def mask_sensitive_data(log_entry):
     """
     Enmascara información sensible en el log, como números de cuenta, transacciones, etc.
     """
-    # Aquí puedes poner cualquier patrón que necesites para enmascarar
-    # Ejemplo de enmascarado de número de cuenta (suponiendo que los números de cuenta son de 12 dígitos)
     log_entry = log_entry.replace("account_number", "****")  # Sustituye números de cuenta
     log_entry = log_entry.replace("password", "****")  # Sustituye contraseñas
     return log_entry
